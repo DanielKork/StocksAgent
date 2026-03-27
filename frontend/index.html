@@ -12,13 +12,19 @@
 </head>
 <body>
     <div class="app-container">
-        <!-- Sidebar: Portfolio -->
+        <!-- Sidebar: Portfolio & Watchlist -->
         <aside class="sidebar" id="sidebar">
             <div class="sidebar-header">
                 <h2>Portfolio</h2>
                 <button class="btn-icon" id="closeSidebar" title="Close sidebar">✕</button>
             </div>
             <div class="sidebar-content">
+                <!-- Market Status Banner -->
+                <div class="market-status-banner" id="marketStatusBanner">
+                    <span class="market-status-dot" id="marketStatusDot"></span>
+                    <span id="marketStatusText">Checking markets...</span>
+                </div>
+
                 <!-- Portfolio Summary -->
                 <div class="portfolio-summary" id="portfolioSummary">
                     <div class="portfolio-label">Total Value</div>
@@ -43,6 +49,20 @@
                         <input type="number" class="form-input" id="addPrice" placeholder="Avg Price" min="0" step="any">
                     </div>
                     <button class="btn btn-primary" id="addPositionBtn">Add to Portfolio</button>
+                </div>
+
+                <!-- Watchlist Section -->
+                <div class="watchlist-section">
+                    <div class="watchlist-header">
+                        <h3>Watchlist</h3>
+                    </div>
+                    <div id="watchlistItems"></div>
+                    <div class="add-watchlist-form">
+                        <div class="form-row">
+                            <input type="text" class="form-input" id="addWatchlistTicker" placeholder="Ticker" maxlength="10">
+                            <button class="btn btn-primary btn-sm" id="addWatchlistBtn">Watch</button>
+                        </div>
+                    </div>
                 </div>
             </div>
         </aside>

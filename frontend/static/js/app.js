@@ -3,6 +3,7 @@
 const API_BASE = '';
 let sessionId = generateSessionId();
 let isWaiting = false;
+let useStreaming = true; // SSE streaming enabled by default
 
 // DOM elements
 const chatMessages = document.getElementById('chatMessages');
@@ -15,6 +16,7 @@ const closeSidebarBtn = document.getElementById('closeSidebar');
 const themeToggle = document.getElementById('themeToggle');
 const newChatBtn = document.getElementById('newChatBtn');
 const addPositionBtn = document.getElementById('addPositionBtn');
+const addWatchlistBtn = document.getElementById('addWatchlistBtn');
 const toastContainer = document.getElementById('toastContainer');
 
 // --- Initialization ---
@@ -22,6 +24,8 @@ const toastContainer = document.getElementById('toastContainer');
 document.addEventListener('DOMContentLoaded', () => {
     setupEventListeners();
     loadPortfolio();
+    loadWatchlist();
+    loadMarketStatus();
     loadTheme();
     chatInput.focus();
 });
@@ -65,6 +69,11 @@ function setupEventListeners() {
 
     // Add position
     addPositionBtn.addEventListener('click', addPosition);
+
+    // Add to watchlist
+    if (addWatchlistBtn) {
+        addWatchlistBtn.addEventListener('click', addToWatchlist);
+    }
 }
 
 // --- Chat Functions ---
@@ -88,6 +97,98 @@ async function sendMessage() {
     isWaiting = true;
     const typingEl = showTypingIndicator();
 
+    if (useStreaming) {
+        await sendMessageStreaming(message, typingEl);
+    } else {
+        await sendMessageClassic(message, typingEl);
+    }
+
+    // Refresh portfolio & watchlist in case agent modified them
+    loadPortfolio();
+    loadWatchlist();
+}
+
+async function sendMessageStreaming(message, typingEl) {
+    try {
+        const response = await fetch(`${API_BASE}/api/chat/stream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message, session_id: sessionId }),
+        });
+
+        if (!response.ok) {
+            const errData = await response.json();
+            typingEl.remove();
+            isWaiting = false;
+            appendMessage('assistant', `⚠️ ${errData.error || 'Request failed'}`);
+            return;
+        }
+
+        // Remove typing indicator and create streaming message element
+        typingEl.remove();
+        const { contentEl } = createStreamingMessage();
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let fullContent = '';
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop(); // Keep incomplete line in buffer
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const jsonStr = line.slice(6);
+                if (!jsonStr) continue;
+
+                try {
+                    const event = JSON.parse(jsonStr);
+
+                    if (event.type === 'content') {
+                        fullContent += event.text;
+                        const rawHtml = marked.parse(fullContent);
+                        contentEl.innerHTML = DOMPurify.sanitize(rawHtml);
+                        chatMessages.scrollTop = chatMessages.scrollHeight;
+                    } else if (event.type === 'tool_status') {
+                        // Show tool execution status
+                        if (event.status === 'executing') {
+                            contentEl.innerHTML = `<div class="tool-status">🔧 Calling <strong>${DOMPurify.sanitize(event.tool)}</strong>...</div>`;
+                        }
+                    } else if (event.type === 'error') {
+                        fullContent = `⚠️ ${event.text}`;
+                        contentEl.innerHTML = DOMPurify.sanitize(marked.parse(fullContent));
+                    } else if (event.type === 'done') {
+                        // Detect ticker references and add charts
+                        const tickerMatches = fullContent.match(/\[\[([A-Z]{1,10})\]\]/g);
+                        if (tickerMatches) {
+                            const tickers = [...new Set(tickerMatches.map(m => m.replace(/[\[\]]/g, '')))];
+                            tickers.forEach(ticker => {
+                                const chartDiv = createChartContainer(ticker);
+                                contentEl.appendChild(chartDiv);
+                            });
+                        }
+                    }
+                } catch (e) {
+                    // Skip invalid JSON
+                }
+            }
+        }
+
+        isWaiting = false;
+
+    } catch (error) {
+        typingEl.remove();
+        isWaiting = false;
+        appendMessage('assistant', '⚠️ Failed to connect to the server. Make sure StocksAgent is running.');
+    }
+}
+
+async function sendMessageClassic(message, typingEl) {
     try {
         const response = await fetch(`${API_BASE}/api/chat`, {
             method: 'POST',
@@ -97,7 +198,6 @@ async function sendMessage() {
 
         const data = await response.json();
 
-        // Remove typing indicator
         typingEl.remove();
         isWaiting = false;
 
@@ -107,14 +207,30 @@ async function sendMessage() {
             appendMessage('assistant', data.reply);
         }
 
-        // Refresh portfolio in case agent modified it
-        loadPortfolio();
-
     } catch (error) {
         typingEl.remove();
         isWaiting = false;
         appendMessage('assistant', '⚠️ Failed to connect to the server. Make sure StocksAgent is running.');
     }
+}
+
+function createStreamingMessage() {
+    const messageEl = document.createElement('div');
+    messageEl.className = 'message assistant';
+
+    const avatarEl = document.createElement('div');
+    avatarEl.className = 'message-avatar';
+    avatarEl.textContent = 'S';
+
+    const contentEl = document.createElement('div');
+    contentEl.className = 'message-content';
+
+    messageEl.appendChild(avatarEl);
+    messageEl.appendChild(contentEl);
+    chatMessages.appendChild(messageEl);
+    chatMessages.scrollTop = chatMessages.scrollHeight;
+
+    return { messageEl, contentEl };
 }
 
 function appendMessage(role, content) {
@@ -331,4 +447,109 @@ function showToast(message, type = 'info') {
     toast.textContent = message;
     toastContainer.appendChild(toast);
     setTimeout(() => toast.remove(), 3000);
+}
+
+// --- Watchlist Functions ---
+
+async function loadWatchlist() {
+    try {
+        const res = await fetch(`${API_BASE}/api/watchlist`);
+        const data = await res.json();
+        renderWatchlist(data);
+    } catch {
+        // Silent fail
+    }
+}
+
+function renderWatchlist(data) {
+    const listEl = document.getElementById('watchlistItems');
+    if (!listEl) return;
+
+    if (!data.items || data.items.length === 0) {
+        listEl.innerHTML = `
+            <div class="empty-state" style="padding: 12px;">
+                <div style="font-size: 12px; color: var(--text-muted);">No stocks in watchlist.</div>
+            </div>
+        `;
+        return;
+    }
+
+    listEl.innerHTML = data.items.map(item => `
+        <div class="watchlist-item">
+            <div class="watchlist-item-info">
+                <span class="watchlist-ticker">${escapeHtml(item.ticker)}</span>
+                <span class="watchlist-price">${item.price ? formatCurrency(item.price) : '—'}</span>
+            </div>
+            <div class="watchlist-item-change">
+                ${item.change_percent != null
+                    ? `<span style="color: ${item.change_percent >= 0 ? 'var(--green)' : 'var(--red)'}">${item.change_percent >= 0 ? '+' : ''}${item.change_percent}%</span>`
+                    : ''}
+                <button class="watchlist-remove" onclick="removeFromWatchlist('${escapeHtml(item.ticker)}')" title="Remove">✕</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function addToWatchlist() {
+    const input = document.getElementById('addWatchlistTicker');
+    const ticker = input.value.trim().toUpperCase();
+    if (!ticker) return showToast('Enter a ticker symbol', 'error');
+
+    try {
+        const res = await fetch(`${API_BASE}/api/watchlist`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ticker }),
+        });
+        if (res.ok) {
+            input.value = '';
+            showToast(`Added ${ticker} to watchlist`, 'success');
+            loadWatchlist();
+        } else {
+            const data = await res.json();
+            showToast(data.error || 'Failed to add to watchlist', 'error');
+        }
+    } catch {
+        showToast('Failed to connect to server', 'error');
+    }
+}
+
+async function removeFromWatchlist(ticker) {
+    try {
+        const res = await fetch(`${API_BASE}/api/watchlist/${ticker}`, { method: 'DELETE' });
+        if (res.ok) {
+            showToast(`Removed ${ticker} from watchlist`, 'success');
+            loadWatchlist();
+        }
+    } catch {
+        showToast('Failed to remove from watchlist', 'error');
+    }
+}
+
+// --- Market Status ---
+
+async function loadMarketStatus() {
+    const dot = document.getElementById('marketStatusDot');
+    const text = document.getElementById('marketStatusText');
+    if (!dot || !text) return;
+
+    try {
+        const res = await fetch(`${API_BASE}/api/market/status`);
+        const data = await res.json();
+
+        if (data.any_market_open) {
+            dot.className = 'market-status-dot open';
+            const openMarkets = data.markets.filter(m => m.is_open).map(m => m.market.split(' ')[0]);
+            text.textContent = `Markets open: ${openMarkets.join(', ')}`;
+        } else {
+            dot.className = 'market-status-dot closed';
+            text.textContent = 'All markets closed';
+        }
+    } catch {
+        dot.className = 'market-status-dot closed';
+        text.textContent = 'Market status unavailable';
+    }
+
+    // Refresh market status every 60 seconds
+    setTimeout(loadMarketStatus, 60000);
 }

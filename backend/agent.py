@@ -1,34 +1,29 @@
 import json
+import os
 from openai import OpenAI
-from backend.config import OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL
+from backend.config import (
+    OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL,
+    AGENT_MAX_ITERATIONS, AGENT_TEMPERATURE, AGENT_CHAT_HISTORY_LIMIT,
+    SYSTEM_PROMPT_PATH,
+)
 from backend import yahoo_service, database
 
 client = OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
-SYSTEM_PROMPT = """You are StocksAgent — a knowledgeable, professional financial assistant powered by real-time Yahoo Finance data.
 
-Your capabilities:
-- Real-time stock quotes and price information
-- Historical price data analysis
-- Company profiles, financials (income statement, balance sheet, cash flow)
-- News and analyst recommendations
-- Technical analysis (RSI, MACD, moving averages, Bollinger Bands, ATR)
-- Stock comparisons (side-by-side metrics)
-- Portfolio tracking and P&L analysis
+def _load_system_prompt() -> str:
+    """Load system prompt from file. Falls back to a minimal prompt if file is missing."""
+    try:
+        path = SYSTEM_PROMPT_PATH
+        if not os.path.isabs(path):
+            path = os.path.join(os.path.dirname(__file__), "..", path)
+        with open(path, "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        return "You are StocksAgent, a financial assistant. Use the provided tools to fetch live data."
 
-Guidelines:
-1. Always use the provided tools to fetch live data — never make up prices or statistics.
-2. Present numbers clearly: format large numbers (e.g., $1.5B market cap), use 2 decimal places for prices.
-3. Use markdown formatting for readability: **bold** for key figures, tables for comparisons.
-4. When showing a stock, include the ticker symbol so the UI can display a chart. Wrap tickers in double brackets like [[AAPL]] so the frontend can detect them and show a TradingView chart.
-5. For technical analysis, explain what the indicators mean in plain language (e.g., "RSI of 75 suggests the stock is overbought").
-6. Be concise but thorough. Don't repeat raw JSON — synthesize the data into a clear answer.
-7. If a user asks about a topic you can answer from general finance knowledge (e.g., "what is P/E ratio?"), answer directly without calling tools.
-8. For portfolio questions, use the portfolio tools to get current holdings and enrich with live data.
-9. When comparing stocks, present data in a markdown table for easy reading.
-10. Always be objective. Never give explicit buy/sell recommendations — present data and analysis and let the user decide.
-11. If a tool call fails or returns an error, tell the user plainly and suggest alternatives.
-"""
+
+SYSTEM_PROMPT = _load_system_prompt()
 
 TOOLS = [
     {
@@ -184,6 +179,51 @@ TOOLS = [
             }
         }
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_market_status",
+            "description": "Check if major stock markets (US, Europe, Asia) are currently open or closed, with local times and trading hours.",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_watchlist",
+            "description": "Get the user's watchlist of tracked stocks (stocks they're interested in but haven't added to portfolio).",
+            "parameters": {"type": "object", "properties": {}, "required": []}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "add_to_watchlist",
+            "description": "Add a stock to the user's watchlist to track it without adding to portfolio.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "Stock ticker symbol"},
+                    "notes": {"type": "string", "description": "Optional notes about why this stock is being watched"}
+                },
+                "required": ["ticker"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remove_from_watchlist",
+            "description": "Remove a stock from the user's watchlist.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "ticker": {"type": "string", "description": "Stock ticker symbol to remove from watchlist"}
+                },
+                "required": ["ticker"]
+            }
+        }
+    },
 ]
 
 TOOL_HANDLERS = {
@@ -204,6 +244,12 @@ TOOL_HANDLERS = {
         args["ticker"], args["shares"], args["avg_price"]
     ),
     "remove_portfolio_position": lambda args: database.delete_position(args["position_id"]),
+    "get_market_status": lambda _: yahoo_service.get_market_status(),
+    "get_watchlist": lambda _: _get_watchlist_with_prices(),
+    "add_to_watchlist": lambda args: database.add_watchlist_item(
+        args["ticker"], args.get("notes", "")
+    ),
+    "remove_from_watchlist": lambda args: database.remove_watchlist_item(args["ticker"]),
 }
 
 
@@ -224,6 +270,53 @@ def _get_portfolio_with_prices() -> dict:
     }
 
 
+def _get_watchlist_with_prices() -> dict:
+    """Get watchlist enriched with current prices."""
+    items = database.get_watchlist()
+    if not items:
+        return {"items": [], "count": 0}
+    enriched = []
+    for item in items:
+        try:
+            quote = yahoo_service.get_realtime_quote(item["ticker"])
+            enriched.append({
+                **item,
+                "price": quote.get("price"),
+                "change": quote.get("change"),
+                "change_percent": quote.get("change_percent"),
+            })
+        except Exception:
+            enriched.append({**item, "price": None, "error": "Failed to fetch price"})
+    return {"items": enriched, "count": len(enriched)}
+
+
+def _serialize_assistant_message(message) -> dict:
+    """Serialize an assistant message, preserving extra fields like reasoning_content for thinking models."""
+    # Use model_dump() to capture all fields including extras from model_extra
+    dumped = message.model_dump() if hasattr(message, "model_dump") else {}
+
+    msg = {"role": "assistant", "content": message.content}
+
+    # Preserve reasoning_content for thinking models (e.g., kimi-k2.5)
+    # The SDK returns it as "reasoning" in model_extra, but the API expects "reasoning_content"
+    reasoning = dumped.get("reasoning") or getattr(message, "reasoning_content", None)
+    if reasoning:
+        msg["reasoning_content"] = reasoning
+
+    # Preserve tool calls
+    if message.tool_calls:
+        msg["tool_calls"] = [
+            {
+                "id": tc.id,
+                "type": "function",
+                "function": {"name": tc.function.name, "arguments": tc.function.arguments},
+            }
+            for tc in message.tool_calls
+        ]
+
+    return msg
+
+
 def _execute_tool(tool_name: str, arguments: dict) -> str:
     handler = TOOL_HANDLERS.get(tool_name)
     if not handler:
@@ -235,31 +328,36 @@ def _execute_tool(tool_name: str, arguments: dict) -> str:
         return json.dumps({"error": f"Tool '{tool_name}' failed: {str(e)}"})
 
 
+def _build_messages(session_id: str, user_message: str) -> list[dict]:
+    """Build the message list from system prompt + chat history + new user message."""
+    history = database.get_chat_history(session_id, limit=AGENT_CHAT_HISTORY_LIMIT)
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for msg in history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    return messages
+
+
 def chat(session_id: str, user_message: str) -> str:
     """Process a user message and return the agent's response."""
     database.save_message(session_id, "user", user_message)
 
-    history = database.get_chat_history(session_id, limit=30)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for msg in history:
-        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages = _build_messages(session_id, user_message)
 
     response = client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=messages,
         tools=TOOLS,
         tool_choice="auto",
-        temperature=0.3,
+        temperature=AGENT_TEMPERATURE,
     )
 
     choice = response.choices[0]
 
-    max_iterations = 10
     iteration = 0
-    while choice.finish_reason == "tool_calls" and iteration < max_iterations:
+    while choice.finish_reason == "tool_calls" and iteration < AGENT_MAX_ITERATIONS:
         iteration += 1
         assistant_msg = choice.message
-        messages.append(assistant_msg)
+        messages.append(_serialize_assistant_message(assistant_msg))
 
         for tool_call in assistant_msg.tool_calls:
             fn_name = tool_call.function.name
@@ -276,7 +374,7 @@ def chat(session_id: str, user_message: str) -> str:
             messages=messages,
             tools=TOOLS,
             tool_choice="auto",
-            temperature=0.3,
+            temperature=AGENT_TEMPERATURE,
         )
         choice = response.choices[0]
 
@@ -285,3 +383,123 @@ def chat(session_id: str, user_message: str) -> str:
     database.save_message(session_id, "assistant", reply)
 
     return reply
+
+
+def chat_stream(session_id: str, user_message: str):
+    """Process a user message and yield SSE events as the response streams in."""
+    database.save_message(session_id, "user", user_message)
+
+    messages = _build_messages(session_id, user_message)
+
+    full_reply = ""
+    iteration = 0
+
+    while iteration <= AGENT_MAX_ITERATIONS:
+        # Check if this is a tool-calling iteration or the first call
+        stream = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            tools=TOOLS,
+            tool_choice="auto",
+            temperature=AGENT_TEMPERATURE,
+            stream=True,
+        )
+
+        # Collect the streamed response
+        content_chunks = []
+        reasoning_chunks = []
+        tool_calls_data = {}  # index -> {id, name, arguments}
+        finish_reason = None
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if not delta:
+                if chunk.choices and chunk.choices[0].finish_reason:
+                    finish_reason = chunk.choices[0].finish_reason
+                continue
+
+            # Accumulate reasoning_content for thinking models (e.g., kimi-k2.5)
+            # The SDK stores it as "reasoning" in model_extra, not "reasoning_content"
+            delta_dump = delta.model_dump() if hasattr(delta, "model_dump") else {}
+            reasoning = delta_dump.get("reasoning") or getattr(delta, "reasoning_content", None)
+            if reasoning:
+                reasoning_chunks.append(reasoning)
+
+            # Stream text content to client
+            if delta.content:
+                content_chunks.append(delta.content)
+                yield f"data: {json.dumps({'type': 'content', 'text': delta.content})}\n\n"
+
+            # Accumulate tool calls
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_data:
+                        tool_calls_data[idx] = {"id": "", "name": "", "arguments": ""}
+                    if tc.id:
+                        tool_calls_data[idx]["id"] = tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls_data[idx]["name"] = tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_data[idx]["arguments"] += tc.function.arguments
+
+            if chunk.choices and chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
+
+        content_so_far = "".join(content_chunks)
+
+        # If we got tool calls, execute them and continue the loop
+        if finish_reason == "tool_calls" and tool_calls_data:
+            iteration += 1
+
+            # Build assistant message with tool calls
+            assistant_tool_calls = []
+            for idx in sorted(tool_calls_data.keys()):
+                tc = tool_calls_data[idx]
+                assistant_tool_calls.append({
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                })
+
+            assistant_msg = {
+                "role": "assistant",
+                "content": content_so_far or None,
+                "tool_calls": assistant_tool_calls,
+            }
+            # Preserve reasoning_content for thinking models
+            reasoning_so_far = "".join(reasoning_chunks)
+            if reasoning_so_far:
+                assistant_msg["reasoning_content"] = reasoning_so_far
+            reasoning_chunks = []
+            messages.append(assistant_msg)
+
+            # Execute each tool and send status events
+            for tc_info in assistant_tool_calls:
+                fn_name = tc_info["function"]["name"]
+                yield f"data: {json.dumps({'type': 'tool_status', 'tool': fn_name, 'status': 'executing'})}\n\n"
+
+                fn_args = json.loads(tc_info["function"]["arguments"])
+                result = _execute_tool(fn_name, fn_args)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_info["id"],
+                    "content": result,
+                })
+
+                yield f"data: {json.dumps({'type': 'tool_status', 'tool': fn_name, 'status': 'done'})}\n\n"
+
+            continue  # Next iteration will stream the follow-up response
+
+        # No more tool calls — we're done
+        full_reply = content_so_far
+        break
+
+    if not full_reply:
+        full_reply = "I wasn't able to generate a response. Please try again."
+        yield f"data: {json.dumps({'type': 'content', 'text': full_reply})}\n\n"
+
+    database.save_message(session_id, "assistant", full_reply)
+
+    yield f"data: {json.dumps({'type': 'done'})}\n\n"

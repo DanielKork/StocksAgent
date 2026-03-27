@@ -793,3 +793,134 @@ body {
     font-size: 32px;
     margin-bottom: 8px;
 }
+
+/* Market Status Banner */
+.market-status-banner {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    margin-bottom: 12px;
+    font-size: 12px;
+    color: var(--text-secondary);
+}
+
+.market-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--text-muted);
+}
+
+.market-status-dot.open {
+    background: var(--green);
+    box-shadow: 0 0 6px var(--green);
+}
+
+.market-status-dot.closed {
+    background: var(--red);
+}
+
+/* Watchlist Section */
+.watchlist-section {
+    margin-top: 16px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius);
+    padding: 12px;
+}
+
+.watchlist-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.watchlist-header h3 {
+    font-size: 13px;
+    color: var(--text-secondary);
+}
+
+.watchlist-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+}
+
+.watchlist-item:last-child {
+    border-bottom: none;
+}
+
+.watchlist-item-info {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.watchlist-ticker {
+    font-weight: 700;
+    color: var(--accent);
+    font-size: 12px;
+}
+
+.watchlist-price {
+    color: var(--text-primary);
+    font-size: 12px;
+}
+
+.watchlist-item-change {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+    font-size: 11px;
+}
+
+.watchlist-remove {
+    background: none;
+    border: none;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 2px 4px;
+    border-radius: 3px;
+    transition: all 0.15s;
+}
+
+.watchlist-remove:hover {
+    color: var(--red);
+    background: var(--red-bg);
+}
+
+.add-watchlist-form {
+    margin-top: 8px;
+}
+
+.add-watchlist-form .form-row {
+    display: flex;
+    gap: 6px;
+}
+
+.btn-sm {
+    padding: 6px 12px;
+    font-size: 12px;
+    width: auto;
+}
+
+/* Tool Status in Streaming */
+.tool-status {
+    color: var(--text-secondary);
+    font-size: 13px;
+    padding: 4px 0;
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}

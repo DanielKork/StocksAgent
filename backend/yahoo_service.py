@@ -1,16 +1,24 @@
 import time
+from datetime import datetime, timezone
 import yfinance as yf
 import pandas as pd
 import ta
 from cachetools import TTLCache
+from backend.config import (
+    CACHE_QUOTE_TTL, CACHE_QUOTE_MAXSIZE,
+    CACHE_INFO_TTL, CACHE_INFO_MAXSIZE,
+    CACHE_FINANCIALS_TTL, CACHE_FINANCIALS_MAXSIZE,
+    YAHOO_MAX_RETRIES, YAHOO_RETRY_DELAY,
+    MAX_COMPARE_STOCKS,
+)
 
-# Caches: 60s for quotes, 1h for financials/info
-_quote_cache = TTLCache(maxsize=200, ttl=60)
-_info_cache = TTLCache(maxsize=100, ttl=3600)
-_financials_cache = TTLCache(maxsize=100, ttl=3600)
+# Caches with configurable TTL and max size
+_quote_cache = TTLCache(maxsize=CACHE_QUOTE_MAXSIZE, ttl=CACHE_QUOTE_TTL)
+_info_cache = TTLCache(maxsize=CACHE_INFO_MAXSIZE, ttl=CACHE_INFO_TTL)
+_financials_cache = TTLCache(maxsize=CACHE_FINANCIALS_MAXSIZE, ttl=CACHE_FINANCIALS_TTL)
 
-_MAX_RETRIES = 3
-_RETRY_DELAY = 2  # seconds, doubles each retry
+_MAX_RETRIES = YAHOO_MAX_RETRIES
+_RETRY_DELAY = YAHOO_RETRY_DELAY
 
 
 def _get_ticker(symbol: str) -> yf.Ticker:
@@ -19,18 +27,18 @@ def _get_ticker(symbol: str) -> yf.Ticker:
 
 def _retry(func, *args, **kwargs):
     """Retry a function call with exponential backoff on rate limit errors."""
-    delay = _RETRY_DELAY
-    for attempt in range(_MAX_RETRIES):
+    delay = YAHOO_RETRY_DELAY
+    for attempt in range(YAHOO_MAX_RETRIES):
         try:
             return func(*args, **kwargs)
         except Exception as e:
             if "RateLimit" in type(e).__name__ or "Too Many Requests" in str(e):
-                if attempt < _MAX_RETRIES - 1:
+                if attempt < YAHOO_MAX_RETRIES - 1:
                     time.sleep(delay)
                     delay *= 2
                     continue
             raise
-    raise RuntimeError(f"Failed after {_MAX_RETRIES} retries")
+    raise RuntimeError(f"Failed after {YAHOO_MAX_RETRIES} retries")
 
 
 def get_realtime_quote(ticker: str) -> dict:
@@ -282,7 +290,7 @@ def get_technical_indicators(ticker: str, period: str = "6mo") -> dict:
 
 def compare_stocks(tickers: list[str]) -> list[dict]:
     results = []
-    for ticker in tickers[:10]:  # limit to 10
+    for ticker in tickers[:MAX_COMPARE_STOCKS]:  # configurable limit
         try:
             quote = get_realtime_quote(ticker)
             info = get_company_info(ticker)
@@ -329,3 +337,73 @@ def get_portfolio_summary(positions: list[dict]) -> list[dict]:
         except Exception:
             enriched.append({**pos, "current_price": None, "error": "Failed to fetch price"})
     return enriched
+
+
+def get_market_status() -> dict:
+    """Check if major markets are currently open or closed."""
+    try:
+        from zoneinfo import ZoneInfo
+    except ImportError:
+        from backports.zoneinfo import ZoneInfo
+
+    now_utc = datetime.now(timezone.utc)
+
+    markets = []
+
+    # US Markets (NYSE/NASDAQ) — ET
+    et = ZoneInfo("America/New_York")
+    now_et = now_utc.astimezone(et)
+    weekday_et = now_et.weekday()  # 0=Mon, 6=Sun
+    hour_et = now_et.hour
+    minute_et = now_et.minute
+    us_open = (
+        weekday_et < 5
+        and (hour_et > 9 or (hour_et == 9 and minute_et >= 30))
+        and hour_et < 16
+    )
+    markets.append({
+        "market": "US (NYSE/NASDAQ)",
+        "timezone": "America/New_York",
+        "local_time": now_et.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "is_open": us_open,
+        "trading_hours": "09:30–16:00 ET",
+        "status": "Open" if us_open else "Closed",
+    })
+
+    # European Markets (LSE) — London
+    london = ZoneInfo("Europe/London")
+    now_london = now_utc.astimezone(london)
+    weekday_london = now_london.weekday()
+    hour_london = now_london.hour
+    lse_open = weekday_london < 5 and 8 <= hour_london < 16
+    markets.append({
+        "market": "Europe (LSE)",
+        "timezone": "Europe/London",
+        "local_time": now_london.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "is_open": lse_open,
+        "trading_hours": "08:00–16:30 GMT/BST",
+        "status": "Open" if lse_open else "Closed",
+    })
+
+    # Asian Markets (Tokyo) — JST
+    tokyo = ZoneInfo("Asia/Tokyo")
+    now_tokyo = now_utc.astimezone(tokyo)
+    weekday_tokyo = now_tokyo.weekday()
+    hour_tokyo = now_tokyo.hour
+    tse_open = weekday_tokyo < 5 and 9 <= hour_tokyo < 15
+    markets.append({
+        "market": "Asia (TSE Tokyo)",
+        "timezone": "Asia/Tokyo",
+        "local_time": now_tokyo.strftime("%Y-%m-%d %H:%M:%S %Z"),
+        "is_open": tse_open,
+        "trading_hours": "09:00–15:00 JST",
+        "status": "Open" if tse_open else "Closed",
+    })
+
+    any_open = any(m["is_open"] for m in markets)
+
+    return {
+        "utc_time": now_utc.strftime("%Y-%m-%d %H:%M:%S UTC"),
+        "any_market_open": any_open,
+        "markets": markets,
+    }
