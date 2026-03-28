@@ -110,10 +110,13 @@ async function sendMessage() {
 
 async function sendMessageStreaming(message, typingEl) {
     try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
         const response = await fetch(`${API_BASE}/api/chat/stream`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ message, session_id: sessionId }),
+            signal: controller.signal,
         });
 
         if (!response.ok) {
@@ -179,12 +182,12 @@ async function sendMessageStreaming(message, typingEl) {
             }
         }
 
+        clearTimeout(timeoutId);
         isWaiting = false;
 
     } catch (error) {
-        typingEl.remove();
-        isWaiting = false;
-        appendMessage('assistant', '⚠️ Failed to connect to the server. Make sure StocksAgent is running.');
+        console.warn('Streaming failed, falling back to classic mode:', error);
+        await sendMessageClassic(message, typingEl);
     }
 }
 
