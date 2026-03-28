@@ -33,6 +33,6 @@ MAX_COMPARE_STOCKS = int(os.getenv("MAX_COMPARE_STOCKS", "10"))
 
 # --- Flask ---
 FLASK_HOST = os.getenv("FLASK_HOST", "0.0.0.0")
-FLASK_PORT = int(os.getenv("FLASK_PORT", "5001"))
+FLASK_PORT = int(os.getenv("PORT", os.getenv("FLASK_PORT", "5001")))
 FLASK_DEBUG = os.getenv("FLASK_DEBUG", "false").lower() == "true"
 CORS_ORIGINS = os.getenv("CORS_ORIGINS", "*")
